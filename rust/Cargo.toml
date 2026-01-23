@@ -1,0 +1,17 @@
+[package]
+name = "stupidfilter"
+version = "0.1.0"
+edition = "2021"
+description = "Text classifier to detect 'stupid' vs 'non-stupid' text using SVM"
+license = "GPL-2.0"
+
+[dependencies]
+regex = "1"
+
+[[bin]]
+name = "stupidfilter"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true

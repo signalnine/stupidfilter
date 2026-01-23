@@ -59,6 +59,18 @@ Text Input → Flex Tokenizer → Feature Extraction → Feature Scaling → SVM
 - Compilation uses g++ with C++11 standard
 - Object files output to `bin/`
 
+## Rust Version
+
+A Rust port is available in the `rust/` directory:
+
+```bash
+cd rust
+cargo build --release
+echo "test" | ./target/release/stupidfilter ../data/c_rbf
+```
+
+See `rust/README.md` for details.
+
 ## Licensing
 
 - Source code: GPL v2
