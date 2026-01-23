@@ -55,24 +55,60 @@ pub fn extract_features(text: &str) -> Features {
     let num_caps = chars.iter().filter(|c| c.is_uppercase()).count() as f64;
     let num_punct = chars.iter().filter(|c| is_punct(**c)).count() as f64;
 
-    // Count words
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let word_count = words.len() as f64;
+    // The flex scanner with REJECT counts ALL substrings of consecutive letters,
+    // not just words. For "This", it counts: This, his, is, s, Thi, hi, i, Th, h, T = many matches
+    // This matches the flex REJECT behavior where each starting position tries all lengths.
+    let mut word_count = 0.0;
+    let mut initial_cap_count = 0.0;
+    let mut intercap_count = 0.0;
 
-    // Count words starting with capital letter
-    let initial_cap_count = words
-        .iter()
-        .filter(|w| {
-            w.chars()
-                .next()
-                .map(|c| c.is_uppercase())
-                .unwrap_or(false)
-        })
-        .count() as f64;
+    let n = chars.len();
 
-    // Count intercap (camelCase) words - lowercase followed by uppercase
-    let intercap_re = Regex::new(r"[a-z]+[A-Z][a-z]*").unwrap();
-    let intercap_count = intercap_re.find_iter(text).count() as f64;
+    // Find all runs of letters and count substrings
+    let mut i = 0;
+    while i < n {
+        if chars[i].is_alphabetic() {
+            // Find the end of this letter run
+            let start = i;
+            while i < n && chars[i].is_alphabetic() {
+                i += 1;
+            }
+            let end = i;
+            let run_len = end - start;
+
+            // Count all substrings of this letter run (flex REJECT behavior)
+            // For a run of length L, there are L*(L+1)/2 substrings
+            word_count += (run_len * (run_len + 1) / 2) as f64;
+
+            // Check if this run starts with uppercase followed by lowercase (initial_cap)
+            // Only count once per run (at the start)
+            let is_at_word_boundary = start == 0 || !chars[start - 1].is_alphabetic();
+            if is_at_word_boundary && run_len >= 1 {
+                let first = chars[start];
+                let second = if run_len >= 2 { Some(chars[start + 1]) } else { None };
+                if first.is_uppercase() {
+                    if let Some(s) = second {
+                        if s.is_lowercase() {
+                            initial_cap_count += 1.0;
+                        }
+                    } else {
+                        // Single uppercase letter counts
+                        initial_cap_count += 1.0;
+                    }
+                }
+            }
+
+            // Check for intercap (camelCase) - lowercase followed by uppercase in the run
+            for j in start..(end - 1) {
+                if chars[j].is_lowercase() && chars[j + 1].is_uppercase() {
+                    intercap_count += 1.0;
+                    break; // Count only once per word
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
 
     // Count repeated emphasis (!! or ??)
     let emphasis_re = Regex::new(r"[!]{2,}|[?]{2,}").unwrap();
