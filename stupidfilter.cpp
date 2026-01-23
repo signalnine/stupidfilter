@@ -679,6 +679,9 @@ extern int yywrap (void );
 #endif
 #endif
 
+/* yywrap() returns 1 to indicate end of input */
+int yywrap(void) { return 1; }
+
     static void yyunput (int c,char *buf_ptr  );
     
 #ifndef yytext_ptr

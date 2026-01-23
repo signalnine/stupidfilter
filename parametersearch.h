@@ -1,7 +1,7 @@
 #include <set>
-#include "../thirdparty/boost/archive/text_oarchive.hpp"
-#include "../thirdparty/boost/archive/text_iarchive.hpp"
-#include "../thirdparty/boost/serialization/set.hpp"
+#include <boost/archive/text_oarchive.hpp>
+#include <boost/archive/text_iarchive.hpp>
+#include <boost/serialization/set.hpp>
 #include <ostream>
 #include "parameterresult.h"
 #include <string>

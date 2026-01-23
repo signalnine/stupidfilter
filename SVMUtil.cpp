@@ -12,7 +12,7 @@
 #include "parametersearch.h"
 #include "parameterresult.h" 
 #include "../thirdparty/libsvm/svm.h"
-#include "../thirdparty/boost/serialization/set.hpp"
+#include <boost/serialization/set.hpp>
 
 void myfunction(int);
 
