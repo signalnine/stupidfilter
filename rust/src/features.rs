@@ -58,10 +58,12 @@ pub fn extract_features(text: &str) -> Features {
     let num_caps = bytes.iter().filter(|&&b| b.is_ascii_uppercase()).count() as f64;
     let num_punct = bytes.iter().filter(|&&b| is_punct_byte(b)).count() as f64;
 
-    // word_count follows the flex rule [a-zA-Z0-9]+ with REJECT: for each
-    // run of consecutive alphanumeric chars of length L, every starting
-    // position within the run fires (L - offset) matches, summing to
-    // L*(L+1)/2 -- the count of all non-empty substrings.
+    // word_count: the compiled C++ DFA matches runs of any non-whitespace
+    // bytes (space/tab/newline are the only delimiters), not just
+    // [a-zA-Z0-9]+ as the reconstructed fclassify.flex suggests. Punctuation
+    // and non-ASCII bytes are part of the run. REJECT enumerates every
+    // non-empty substring at every starting position, so a run of length L
+    // contributes L*(L+1)/2 fires.
     let mut word_count = 0.0;
     let mut initial_cap_count = 0.0;
     let mut intercap_count = 0.0;
@@ -70,9 +72,9 @@ pub fn extract_features(text: &str) -> Features {
 
     let mut i = 0;
     while i < n {
-        if bytes[i].is_ascii_alphanumeric() {
+        if !is_ws_byte(bytes[i]) {
             let start = i;
-            while i < n && bytes[i].is_ascii_alphanumeric() {
+            while i < n && !is_ws_byte(bytes[i]) {
                 i += 1;
             }
             let end = i;
@@ -581,11 +583,13 @@ mod tests {
         assert_eq!(count_misspellings("aa   u   bb"), 5.0);
     }
 
-    // word_count follows the alphanumeric rule [a-zA-Z0-9]+ with REJECT.
+    // word_count matches runs of any non-whitespace bytes (space/tab/newline
+    // are the only delimiters). Reference values from the instrumented C++
+    // binary.
 
     #[test]
     fn word_count_includes_digits_in_runs() {
-        // "gr8" is a single alphanumeric run of length 3 -> 3*4/2 = 6.
+        // "gr8" is a single run of length 3 -> 3*4/2 = 6.
         let features = extract_features("gr8");
         assert_eq!(features.word_length * 3.0, 6.0);
     }
@@ -598,10 +602,40 @@ mod tests {
     }
 
     #[test]
-    fn word_count_splits_on_non_alphanumeric() {
+    fn word_count_splits_on_whitespace_only() {
         // "ab 12" -> two runs of length 2 each -> 3 + 3 = 6.
         let features = extract_features("ab 12");
         assert_eq!(features.word_length * 5.0, 6.0);
+        // Tab is also a delimiter: "ab\t12" -> same as space.
+        let features = extract_features("ab\t12");
+        assert_eq!(features.word_length * 5.0, 6.0);
+        // Newline is a delimiter: "ab\n12" -> two length-2 runs.
+        let features = extract_features("ab\n12");
+        assert_eq!(features.word_length * 5.0, 6.0);
+    }
+
+    #[test]
+    fn word_count_treats_punctuation_as_word_char() {
+        // C++ DFA reference: "abc.def" is one length-7 run -> 7*8/2 = 28.
+        let features = extract_features("abc.def");
+        assert_eq!(features.word_length * 7.0, 28.0);
+        // "Hello.World." is one length-12 run -> 12*13/2 = 78.
+        let features = extract_features("Hello.World.");
+        assert_eq!(features.word_length * 12.0, 78.0);
+        // Leading/trailing dots stay in the run: "...abc" is length 6 -> 21.
+        let features = extract_features("...abc");
+        assert_eq!(features.word_length * 6.0, 21.0);
+    }
+
+    #[test]
+    fn word_count_treats_non_ascii_bytes_as_word_chars() {
+        // C++ DFA reference: 'é' (UTF-8 0xC3 0xA9) is two non-whitespace
+        // bytes -> one length-2 run -> 2*3/2 = 3.
+        let features = extract_features("é");
+        assert_eq!(features.word_length * 2.0, 3.0);
+        // "café" is 5 non-whitespace bytes -> one length-5 run -> 15.
+        let features = extract_features("café");
+        assert_eq!(features.word_length * 5.0, 15.0);
     }
 
     // The flex rules only match ASCII [a-z]/[A-Z]. Non-ASCII Unicode letters
@@ -640,12 +674,12 @@ mod tests {
 
     #[test]
     fn num_total_counts_bytes_not_codepoints() {
-        // "é" = 2 bytes, so word_length = word_count / 2.
-        // word_count is a run of [a-zA-Z0-9]+ which matches no bytes of 'é',
-        // so word_count = 0 and word_length = 0.
+        // "é" = 2 bytes. num_lowers / num_caps use ASCII predicates so are
+        // zero; word_count treats any non-whitespace byte as a word char,
+        // matching the C++ DFA.
         let features = extract_features("é");
-        // Non-ASCII chars don't form word runs, so word_length == 0.
-        assert_eq!(features.word_length, 0.0);
+        assert_eq!(features.num_lowers, 0.0);
+        assert_eq!(features.num_caps, 0.0);
     }
 
     #[test]
