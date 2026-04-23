@@ -31,9 +31,14 @@ impl Features {
 }
 
 /// Extract features from text
+///
+/// Operates on raw bytes to match the flex scanner's byte-by-byte semantics.
+/// The flex rules use ASCII ranges ([a-z], [A-Z], [a-zA-Z0-9]); multi-byte
+/// UTF-8 sequences never satisfy these classes, so each continuation byte
+/// contributes only to num_total and is otherwise ignored.
 pub fn extract_features(text: &str) -> Features {
-    let chars: Vec<char> = text.chars().collect();
-    let num_total = chars.len() as f64;
+    let bytes = text.as_bytes();
+    let num_total = bytes.len() as f64;
 
     if num_total == 0.0 {
         return Features {
@@ -48,10 +53,10 @@ pub fn extract_features(text: &str) -> Features {
         };
     }
 
-    // Count character types
-    let num_lowers = chars.iter().filter(|c| c.is_lowercase()).count() as f64;
-    let num_caps = chars.iter().filter(|c| c.is_uppercase()).count() as f64;
-    let num_punct = chars.iter().filter(|c| is_punct(**c)).count() as f64;
+    // Count character types -- ASCII-only, matching flex [a-z]/[A-Z]/punct.
+    let num_lowers = bytes.iter().filter(|&&b| b.is_ascii_lowercase()).count() as f64;
+    let num_caps = bytes.iter().filter(|&&b| b.is_ascii_uppercase()).count() as f64;
+    let num_punct = bytes.iter().filter(|&&b| is_punct_byte(b)).count() as f64;
 
     // word_count follows the flex rule [a-zA-Z0-9]+ with REJECT: for each
     // run of consecutive alphanumeric chars of length L, every starting
@@ -61,13 +66,13 @@ pub fn extract_features(text: &str) -> Features {
     let mut initial_cap_count = 0.0;
     let mut intercap_count = 0.0;
 
-    let n = chars.len();
+    let n = bytes.len();
 
     let mut i = 0;
     while i < n {
-        if chars[i].is_ascii_alphanumeric() {
+        if bytes[i].is_ascii_alphanumeric() {
             let start = i;
-            while i < n && chars[i].is_ascii_alphanumeric() {
+            while i < n && bytes[i].is_ascii_alphanumeric() {
                 i += 1;
             }
             let end = i;
@@ -78,25 +83,25 @@ pub fn extract_features(text: &str) -> Features {
         }
     }
 
-    // initial_cap / intercap still use pure-letter runs to match the existing
-    // flex rules (which look at [a-zA-Z] only, not digits).
+    // initial_cap / intercap use ASCII letter runs only, matching flex's
+    // [a-zA-Z]-based rules. Non-ASCII UTF-8 bytes act as word boundaries.
     let mut j = 0;
     while j < n {
-        if chars[j].is_alphabetic() {
+        if bytes[j].is_ascii_alphabetic() {
             let start = j;
-            while j < n && chars[j].is_alphabetic() {
+            while j < n && bytes[j].is_ascii_alphabetic() {
                 j += 1;
             }
             let end = j;
             let run_len = end - start;
 
-            let is_at_word_boundary = start == 0 || !chars[start - 1].is_alphabetic();
+            let is_at_word_boundary = start == 0 || !bytes[start - 1].is_ascii_alphabetic();
             if is_at_word_boundary && run_len >= 1 {
-                let first = chars[start];
-                let second = if run_len >= 2 { Some(chars[start + 1]) } else { None };
-                if first.is_uppercase() {
+                let first = bytes[start];
+                let second = if run_len >= 2 { Some(bytes[start + 1]) } else { None };
+                if first.is_ascii_uppercase() {
                     if let Some(s) = second {
-                        if s.is_lowercase() {
+                        if s.is_ascii_lowercase() {
                             initial_cap_count += 1.0;
                         }
                     } else {
@@ -107,7 +112,7 @@ pub fn extract_features(text: &str) -> Features {
 
             if run_len >= 2 {
                 for k in start..(end - 1) {
-                    if chars[k + 1].is_uppercase() {
+                    if bytes[k + 1].is_ascii_uppercase() {
                         intercap_count += 1.0;
                     }
                 }
@@ -154,41 +159,42 @@ pub fn extract_features(text: &str) -> Features {
     }
 }
 
-/// Check if character is punctuation
-fn is_punct(c: char) -> bool {
+/// Check if byte is in the flex punct character class
+/// [!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~]
+fn is_punct_byte(b: u8) -> bool {
     matches!(
-        c,
-        '!' | '"'
-            | '#'
-            | '$'
-            | '%'
-            | '&'
-            | '\''
-            | '('
-            | ')'
-            | '*'
-            | '+'
-            | ','
-            | '-'
-            | '.'
-            | '/'
-            | ':'
-            | ';'
-            | '<'
-            | '='
-            | '>'
-            | '?'
-            | '@'
-            | '['
-            | '\\'
-            | ']'
-            | '^'
-            | '_'
-            | '`'
-            | '{'
-            | '|'
-            | '}'
-            | '~'
+        b,
+        b'!' | b'"'
+            | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b'-'
+            | b'.'
+            | b'/'
+            | b':'
+            | b';'
+            | b'<'
+            | b'='
+            | b'>'
+            | b'?'
+            | b'@'
+            | b'['
+            | b'\\'
+            | b']'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'{'
+            | b'|'
+            | b'}'
+            | b'~'
     )
 }
 
@@ -507,5 +513,71 @@ mod tests {
         // "ab 12" -> two runs of length 2 each -> 3 + 3 = 6.
         let features = extract_features("ab 12");
         assert_eq!(features.word_length * 5.0, 6.0);
+    }
+
+    // The flex rules only match ASCII [a-z]/[A-Z]. Non-ASCII Unicode letters
+    // (like 'é' or 'É') must not count toward num_lowers / num_caps. num_total
+    // counts bytes (matching flex '.' which matches any non-newline byte).
+
+    #[test]
+    fn num_lowers_excludes_non_ascii_letters() {
+        // "cafe" + 'é' (UTF-8 0xC3 0xA9) = 5 bytes, 3 ASCII lowercase.
+        let features = extract_features("café");
+        assert!(
+            (features.num_lowers - 3.0 / 5.0).abs() < 1e-9,
+            "expected 3/5 = 0.6, got {}",
+            features.num_lowers
+        );
+    }
+
+    #[test]
+    fn num_caps_excludes_non_ascii_letters() {
+        // "JOS" + 'É' (UTF-8 0xC3 0x89) = 5 bytes, 3 ASCII uppercase.
+        let features = extract_features("JOSÉ");
+        assert!(
+            (features.num_caps - 3.0 / 5.0).abs() < 1e-9,
+            "expected 3/5 = 0.6, got {}",
+            features.num_caps
+        );
+    }
+
+    #[test]
+    fn non_ascii_letters_neither_lower_nor_upper() {
+        // "é" alone: 2 bytes, zero ASCII lowercase/uppercase.
+        let features = extract_features("é");
+        assert_eq!(features.num_lowers, 0.0);
+        assert_eq!(features.num_caps, 0.0);
+    }
+
+    #[test]
+    fn num_total_counts_bytes_not_codepoints() {
+        // "é" = 2 bytes, so word_length = word_count / 2.
+        // word_count is a run of [a-zA-Z0-9]+ which matches no bytes of 'é',
+        // so word_count = 0 and word_length = 0.
+        let features = extract_features("é");
+        // Non-ASCII chars don't form word runs, so word_length == 0.
+        assert_eq!(features.word_length, 0.0);
+    }
+
+    #[test]
+    fn initial_cap_uses_ascii_boundary() {
+        // "éHello": 'é' is not an ASCII letter, so "Hello" is at a word
+        // boundary. Expected initial_cap_count = 1.
+        // chars: 0xC3 0xA9 H e l l o = 7 bytes. word_count: one run "Hello"
+        // (length 5) -> 5*6/2 = 15. initial_cap ratio = 1/15.
+        let features = extract_features("éHello");
+        assert!(
+            (features.initial_cap - 1.0 / 15.0).abs() < 1e-9,
+            "expected 1/15, got {}",
+            features.initial_cap
+        );
+    }
+
+    #[test]
+    fn intercap_uses_ascii_letter_pairs() {
+        // "éHello": even though 'é' is a Unicode letter, flex only sees
+        // ASCII letters. "Hello" alone has no inter-capitalization.
+        let features = extract_features("éHello");
+        assert_eq!(features.intercap, 0.0);
     }
 }
