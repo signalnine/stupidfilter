@@ -1,8 +1,6 @@
 // Feature extraction module
 // Extracts 8 text features for SVM classification
 
-use regex::Regex;
-
 /// The 8 features used by the classifier
 #[derive(Debug, Clone)]
 pub struct Features {
@@ -120,8 +118,7 @@ pub fn extract_features(text: &str) -> Features {
     }
 
     // Count repeated emphasis (!! or ??)
-    let emphasis_re = Regex::new(r"[!]{2,}|[?]{2,}").unwrap();
-    let repeat_emphasis = emphasis_re.find_iter(text).count() as f64;
+    let repeat_emphasis = count_repeat_emphasis(text);
 
     // Count misspellings / l33t speak
     let misspell = count_misspellings(text);
@@ -245,6 +242,38 @@ pub(crate) fn count_misspellings(text: &str) -> f64 {
     count
 }
 
+/// Count repeated emphasis runs. Mirrors the flex rule
+/// `[!]{2,}|[?]{2,} ++repeat_emphasis; REJECT;`: for each run of N consecutive
+/// identical emphasis characters (all '!' or all '?'), REJECT enumerates
+/// lengths N, N-1, ..., 2 at the run's start and then the scanner advances
+/// past the longest match, yielding (N - 1) fires per run. A single '!' or
+/// '?' (N = 1) does not fire. '!' and '?' are separate runs: "!?" is two
+/// length-1 runs and contributes 0.
+pub(crate) fn count_repeat_emphasis(text: &str) -> f64 {
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let mut count = 0.0;
+
+    let mut i = 0;
+    while i < n {
+        let c = bytes[i];
+        if c == b'!' || c == b'?' {
+            let start = i;
+            while i < n && bytes[i] == c {
+                i += 1;
+            }
+            let run_len = i - start;
+            if run_len >= 2 {
+                count += (run_len - 1) as f64;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,8 +287,49 @@ mod tests {
 
     #[test]
     fn test_extract_features_emphasis() {
+        // "OMG!!! WOW???": two runs of length 3 -> (3-1) + (3-1) = 4.
         let features = extract_features("OMG!!! WOW???");
-        assert!(features.repeat_emphasis >= 2.0);
+        assert_eq!(features.repeat_emphasis, 4.0);
+    }
+
+    // Reference values from running the instrumented C++ binary on the same
+    // inputs. The flex rule fires (N - 1) times per run of N identical '!' or
+    // '?' characters; runs of different characters do NOT combine.
+
+    #[test]
+    fn repeat_emphasis_zero_for_single_char() {
+        assert_eq!(count_repeat_emphasis("!"), 0.0);
+        assert_eq!(count_repeat_emphasis("?"), 0.0);
+    }
+
+    #[test]
+    fn repeat_emphasis_counts_n_minus_one() {
+        assert_eq!(count_repeat_emphasis("!!"), 1.0);
+        assert_eq!(count_repeat_emphasis("!!!"), 2.0);
+        assert_eq!(count_repeat_emphasis("!!!!"), 3.0);
+        assert_eq!(count_repeat_emphasis("!!!!!!!!!!"), 9.0);
+    }
+
+    #[test]
+    fn repeat_emphasis_counts_question_runs() {
+        assert_eq!(count_repeat_emphasis("??"), 1.0);
+        assert_eq!(count_repeat_emphasis("????"), 3.0);
+    }
+
+    #[test]
+    fn repeat_emphasis_sums_across_runs() {
+        // "wow!!!! test????": two runs of 4 -> 3 + 3 = 6.
+        assert_eq!(count_repeat_emphasis("wow!!!! test????"), 6.0);
+    }
+
+    #[test]
+    fn repeat_emphasis_does_not_pool_bangs_and_questions() {
+        // Adjacent '!' and '?' are two separate length-1 runs -> 0.
+        assert_eq!(count_repeat_emphasis("!?"), 0.0);
+        // "!!??" is two length-2 runs -> 1 + 1 = 2.
+        assert_eq!(count_repeat_emphasis("!!??"), 2.0);
+        // Separator between runs.
+        assert_eq!(count_repeat_emphasis("!!a!!"), 1.0 + 1.0);
     }
 
     #[test]
