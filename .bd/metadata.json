@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "stupidfilter",
+  "project_id": "ccbd5d53-8887-4ea8-bbfa-71a865ae0142"
+}
