@@ -83,8 +83,28 @@ pub fn extract_features(text: &str) -> Features {
         }
     }
 
-    // initial_cap / intercap use ASCII letter runs only, matching flex's
-    // [a-zA-Z]-based rules. Non-ASCII UTF-8 bytes act as word boundaries.
+    // initial_cap fires once per [A-Z][a-z]+ substring that is immediately
+    // followed by whitespace (space, tab, or newline). Leading context is
+    // unconstrained. The actual DFA rule is reverse-engineered from the
+    // instrumented C++ binary; the reconstructed fclassify.flex is an
+    // approximation.
+    let mut k = 0;
+    while k < n {
+        if bytes[k].is_ascii_uppercase() {
+            let mut m = k + 1;
+            while m < n && bytes[m].is_ascii_lowercase() {
+                m += 1;
+            }
+            if m > k + 1 && m < n && is_ws_byte(bytes[m]) {
+                initial_cap_count += 1.0;
+            }
+        }
+        k += 1;
+    }
+
+    // intercap (unchanged here) still uses the legacy [a-zA-Z][A-Z]-pair scan.
+    // That rule also diverges from the compiled C++ DFA on inputs with trailing
+    // whitespace, but is left as-is in this fix and tracked separately.
     let mut j = 0;
     while j < n {
         if bytes[j].is_ascii_alphabetic() {
@@ -94,21 +114,6 @@ pub fn extract_features(text: &str) -> Features {
             }
             let end = j;
             let run_len = end - start;
-
-            let is_at_word_boundary = start == 0 || !bytes[start - 1].is_ascii_alphabetic();
-            if is_at_word_boundary && run_len >= 1 {
-                let first = bytes[start];
-                let second = if run_len >= 2 { Some(bytes[start + 1]) } else { None };
-                if first.is_ascii_uppercase() {
-                    if let Some(s) = second {
-                        if s.is_ascii_lowercase() {
-                            initial_cap_count += 1.0;
-                        }
-                    } else {
-                        initial_cap_count += 1.0;
-                    }
-                }
-            }
 
             if run_len >= 2 {
                 for k in start..(end - 1) {
@@ -157,6 +162,12 @@ pub fn extract_features(text: &str) -> Features {
         word_length,
         misspell,
     }
+}
+
+/// Whitespace bytes as treated by the flex scanner's trailing-context rules
+/// (space, tab, newline only).
+fn is_ws_byte(b: u8) -> bool {
+    b == b' ' || b == b'\t' || b == b'\n'
 }
 
 /// Check if byte is in the flex punct character class
@@ -283,6 +294,84 @@ pub(crate) fn count_repeat_emphasis(text: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Recover the raw initial_cap counter (pre-division) used by the flex
+    /// scanner, to compare against instrumented C++ reference values.
+    fn initial_cap_count(input: &str) -> f64 {
+        let features = extract_features(input);
+        let num_total = input.as_bytes().len() as f64;
+        let word_count = features.word_length * num_total;
+        (features.initial_cap * word_count).round()
+    }
+
+    // Reference values come from instrumenting stupidfilter.cpp with a stderr
+    // print of the raw initial_cap counter just before svm_predict. The actual
+    // rule 6 (as compiled into the DFA) fires once per [A-Z][a-z]+ substring
+    // that is immediately followed by [ \t\n]. Leading context is unconstrained.
+
+    #[test]
+    fn initial_cap_zero_without_trailing_whitespace() {
+        assert_eq!(initial_cap_count("Hello"), 0.0);
+        assert_eq!(initial_cap_count("Aa"), 0.0);
+        assert_eq!(initial_cap_count(".Hello"), 0.0);
+        assert_eq!(initial_cap_count(" Hello"), 0.0);
+    }
+
+    #[test]
+    fn initial_cap_fires_with_trailing_space_tab_newline() {
+        assert_eq!(initial_cap_count("Hello "), 1.0);
+        assert_eq!(initial_cap_count("Hello\t"), 1.0);
+        assert_eq!(initial_cap_count("Hello\n"), 1.0);
+        assert_eq!(initial_cap_count("Aa "), 1.0);
+    }
+
+    #[test]
+    fn initial_cap_requires_lowercase_after_capital() {
+        assert_eq!(initial_cap_count("A "), 0.0);
+        assert_eq!(initial_cap_count("AB "), 0.0);
+        assert_eq!(initial_cap_count("ABCDEF "), 0.0);
+    }
+
+    #[test]
+    fn initial_cap_leading_context_is_unconstrained() {
+        assert_eq!(initial_cap_count(".Hello "), 1.0);
+        assert_eq!(initial_cap_count(",Zebra "), 1.0);
+        assert_eq!(initial_cap_count("Hi!World "), 1.0);
+        assert_eq!(initial_cap_count("1Ab "), 1.0);
+        assert_eq!(initial_cap_count("aAb "), 1.0);
+        // Non-ASCII byte: é is 0xC3 0xA9, neither ASCII letter nor whitespace.
+        assert_eq!(initial_cap_count("éHello "), 1.0);
+    }
+
+    #[test]
+    fn initial_cap_multiple_words() {
+        assert_eq!(initial_cap_count("Foo Bar"), 1.0);
+        assert_eq!(initial_cap_count("Foo Bar "), 2.0);
+        assert_eq!(initial_cap_count("Foo Bar Baz"), 2.0);
+        assert_eq!(initial_cap_count("Hello World Foo"), 2.0);
+        assert_eq!(initial_cap_count("Aaaa Bbbb "), 2.0);
+    }
+
+    #[test]
+    fn initial_cap_inner_match_in_cap_run() {
+        // "ABc " -> the [A-Z][a-z]+ match is "Bc" (inner position), followed
+        // by space. Fires 1.
+        assert_eq!(initial_cap_count("ABc "), 1.0);
+        // Same logic: "AAAbc " -> match "Abc" at position 2, followed by space.
+        assert_eq!(initial_cap_count("AAAbc "), 1.0);
+    }
+
+    #[test]
+    fn initial_cap_only_match_with_trailing_whitespace() {
+        // "AbAb " -> first "Ab" is followed by 'A' (not whitespace); only the
+        // second "Ab" qualifies.
+        assert_eq!(initial_cap_count("AbAb "), 1.0);
+        // "Hello.World " -> "Hello" is followed by '.', only "World" qualifies.
+        assert_eq!(initial_cap_count("Hello.World "), 1.0);
+        assert_eq!(initial_cap_count("Hello.World"), 0.0);
+        // "AbCd " -> "Ab" followed by C, skip. "Cd" followed by space, fire.
+        assert_eq!(initial_cap_count("AbCd "), 1.0);
+    }
 
     #[test]
     fn test_extract_features_normal() {
@@ -561,16 +650,10 @@ mod tests {
 
     #[test]
     fn initial_cap_uses_ascii_boundary() {
-        // "éHello": 'é' is not an ASCII letter, so "Hello" is at a word
-        // boundary. Expected initial_cap_count = 1.
-        // chars: 0xC3 0xA9 H e l l o = 7 bytes. word_count: one run "Hello"
-        // (length 5) -> 5*6/2 = 15. initial_cap ratio = 1/15.
-        let features = extract_features("éHello");
-        assert!(
-            (features.initial_cap - 1.0 / 15.0).abs() < 1e-9,
-            "expected 1/15, got {}",
-            features.initial_cap
-        );
+        // "éHello" has no trailing whitespace, so rule 6 does not fire.
+        // "éHello " (with trailing space) fires once.
+        assert_eq!(initial_cap_count("éHello"), 0.0);
+        assert_eq!(initial_cap_count("éHello "), 1.0);
     }
 
     #[test]
