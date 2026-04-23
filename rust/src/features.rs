@@ -55,33 +55,43 @@ pub fn extract_features(text: &str) -> Features {
     let num_caps = chars.iter().filter(|c| c.is_uppercase()).count() as f64;
     let num_punct = chars.iter().filter(|c| is_punct(**c)).count() as f64;
 
-    // The flex scanner with REJECT counts ALL substrings of consecutive letters,
-    // not just words. For "This", it counts: This, his, is, s, Thi, hi, i, Th, h, T = many matches
-    // This matches the flex REJECT behavior where each starting position tries all lengths.
+    // word_count follows the flex rule [a-zA-Z0-9]+ with REJECT: for each
+    // run of consecutive alphanumeric chars of length L, every starting
+    // position within the run fires (L - offset) matches, summing to
+    // L*(L+1)/2 -- the count of all non-empty substrings.
     let mut word_count = 0.0;
     let mut initial_cap_count = 0.0;
     let mut intercap_count = 0.0;
 
     let n = chars.len();
 
-    // Find all runs of letters and count substrings
     let mut i = 0;
     while i < n {
-        if chars[i].is_alphabetic() {
-            // Find the end of this letter run
+        if chars[i].is_ascii_alphanumeric() {
             let start = i;
-            while i < n && chars[i].is_alphabetic() {
+            while i < n && chars[i].is_ascii_alphanumeric() {
                 i += 1;
             }
             let end = i;
             let run_len = end - start;
-
-            // Count all substrings of this letter run (flex REJECT behavior)
-            // For a run of length L, there are L*(L+1)/2 substrings
             word_count += (run_len * (run_len + 1) / 2) as f64;
+        } else {
+            i += 1;
+        }
+    }
 
-            // Check if this run starts with uppercase followed by lowercase (initial_cap)
-            // Only count once per run (at the start)
+    // initial_cap / intercap still use pure-letter runs to match the existing
+    // flex rules (which look at [a-zA-Z] only, not digits).
+    let mut j = 0;
+    while j < n {
+        if chars[j].is_alphabetic() {
+            let start = j;
+            while j < n && chars[j].is_alphabetic() {
+                j += 1;
+            }
+            let end = j;
+            let run_len = end - start;
+
             let is_at_word_boundary = start == 0 || !chars[start - 1].is_alphabetic();
             if is_at_word_boundary && run_len >= 1 {
                 let first = chars[start];
@@ -92,24 +102,20 @@ pub fn extract_features(text: &str) -> Features {
                             initial_cap_count += 1.0;
                         }
                     } else {
-                        // Single uppercase letter counts
                         initial_cap_count += 1.0;
                     }
                 }
             }
 
-            // Intercap: flex rule [a-zA-Z][A-Z] fires once for every position
-            // where any letter is followed by an uppercase letter (counted per
-            // match, not once per run).
             if run_len >= 2 {
-                for j in start..(end - 1) {
-                    if chars[j + 1].is_uppercase() {
+                for k in start..(end - 1) {
+                    if chars[k + 1].is_uppercase() {
                         intercap_count += 1.0;
                     }
                 }
             }
         } else {
-            i += 1;
+            j += 1;
         }
     }
 
@@ -189,19 +195,52 @@ fn is_punct(c: char) -> bool {
     )
 }
 
-/// Count misspellings and l33t speak patterns
-fn count_misspellings(text: &str) -> f64 {
-    let text_lower = text.to_lowercase();
+/// Count misspellings. Reverse-engineered from the C++ binary's behavior: the
+/// flex rule has two alternatives, both counted additively.
+///
+/// Rule A: runs of two or more literal ' ' characters. A run of length N
+/// fires (N - 1) matches (REJECT enumerates lengths 2..=N). Tabs and newlines
+/// are not counted -- only ' '. classify.sh normalizes runs of spaces away,
+/// so this alternative rarely fires in the standard pipeline.
+///
+/// Rule B: a small set of chat/l33t abbreviations (u, r, n, g, y, ur, gr8,
+/// all lowercase) surrounded by literal ' ' on both sides. Leading space is
+/// consumed; trailing space is trailing context. End-of-input, tabs, and
+/// punctuation do NOT satisfy either boundary.
+pub(crate) fn count_misspellings(text: &str) -> f64 {
+    let bytes = text.as_bytes();
+    let n = bytes.len();
     let mut count = 0.0;
 
-    // Pattern: standalone "u" or "ur" as word (you/your)
-    let u_re = Regex::new(r"(?i)\b[Uu][Rr]?\b").unwrap();
-    count += u_re.find_iter(&text_lower).count() as f64;
+    let mut i = 0;
+    while i < n {
+        if bytes[i] == b' ' {
+            let start = i;
+            while i < n && bytes[i] == b' ' {
+                i += 1;
+            }
+            let run_len = i - start;
+            if run_len >= 2 {
+                count += (run_len - 1) as f64;
+            }
+        } else {
+            i += 1;
+        }
+    }
 
-    // Pattern: numbers mixed with letters (l33t speak)
-    // e.g., gr8, l8r, 4ever, 2day, b4, etc.
-    let leet_re = Regex::new(r"\b\w*[0-9]+\w*[a-zA-Z]+\w*\b|\b\w*[a-zA-Z]+\w*[0-9]+\w*\b").unwrap();
-    count += leet_re.find_iter(text).count() as f64;
+    const ABBREVS: &[&[u8]] = &[b"gr8", b"ur", b"u", b"r", b"n", b"g", b"y"];
+    for i in 0..n {
+        if bytes[i] != b' ' {
+            continue;
+        }
+        for abbrev in ABBREVS {
+            let end = i + 1 + abbrev.len();
+            if end < n && &bytes[i + 1..end] == *abbrev && bytes[end] == b' ' {
+                count += 1.0;
+                break;
+            }
+        }
+    }
 
     count
 }
@@ -224,9 +263,10 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_features_leet() {
+    fn test_extract_features_leet_has_alphanumeric_runs() {
+        // Alphanumeric runs include digits, so wlen > 0.
         let features = extract_features("u r 2 cool 4 school");
-        assert!(features.misspell > 0.0);
+        assert!(features.word_length > 0.0);
     }
 
     // Helper: convert the intercap ratio back to the raw count the flex
@@ -285,5 +325,117 @@ mod tests {
     fn intercap_does_not_cross_whitespace() {
         // "Hello World": pairs across the space are not letter-letter -> 0.
         assert_eq!(intercap_count("Hello World"), 0.0);
+    }
+
+    // Reference values come from running the C++ binary with feature-dump
+    // instrumentation on the same inputs. The scanner's actual misspell rule
+    // matches runs of two or more ' ' characters (not tabs, not newlines).
+
+    #[test]
+    fn misspell_zero_for_single_space() {
+        assert_eq!(count_misspellings(" "), 0.0);
+    }
+
+    #[test]
+    fn misspell_counts_n_minus_one_for_space_run() {
+        assert_eq!(count_misspellings("  "), 1.0);
+        assert_eq!(count_misspellings("   "), 2.0);
+        assert_eq!(count_misspellings("    "), 3.0);
+    }
+
+    #[test]
+    fn misspell_sums_across_space_runs() {
+        assert_eq!(count_misspellings("a  b   c"), 1.0 + 2.0);
+    }
+
+    #[test]
+    fn misspell_ignores_tabs() {
+        // Tabs are not matched by the scanner's misspell rule.
+        assert_eq!(count_misspellings("\t\t\t"), 0.0);
+    }
+
+    #[test]
+    fn misspell_zero_for_bare_leet_words() {
+        // Without surrounding spaces, none of the abbreviation patterns fire.
+        assert_eq!(count_misspellings("gr8"), 0.0);
+        assert_eq!(count_misspellings("4ever"), 0.0);
+        assert_eq!(count_misspellings("l8r"), 0.0);
+        assert_eq!(count_misspellings("u4me"), 0.0);
+    }
+
+    #[test]
+    fn misspell_fires_for_surrounded_abbrevs() {
+        assert_eq!(count_misspellings("aa u bb"), 1.0);
+        assert_eq!(count_misspellings("aa r bb"), 1.0);
+        assert_eq!(count_misspellings("aa n bb"), 1.0);
+        assert_eq!(count_misspellings("aa g bb"), 1.0);
+        assert_eq!(count_misspellings("aa y bb"), 1.0);
+        assert_eq!(count_misspellings("aa ur bb"), 1.0);
+        assert_eq!(count_misspellings("aa gr8 bb"), 1.0);
+    }
+
+    #[test]
+    fn misspell_abbrev_needs_space_on_both_sides() {
+        // No leading space / no trailing space / end-of-input = no match.
+        assert_eq!(count_misspellings("u"), 0.0);
+        assert_eq!(count_misspellings("u bb"), 0.0);
+        assert_eq!(count_misspellings("aa u"), 0.0);
+        assert_eq!(count_misspellings("aa u\tbb"), 0.0);
+        assert_eq!(count_misspellings("aa!u bb"), 0.0);
+        assert_eq!(count_misspellings("aa u!bb"), 0.0);
+    }
+
+    #[test]
+    fn misspell_abbrev_is_case_sensitive() {
+        assert_eq!(count_misspellings("aa U bb"), 0.0);
+        assert_eq!(count_misspellings("aa UR bb"), 0.0);
+        assert_eq!(count_misspellings("aa GR8 bb"), 0.0);
+    }
+
+    #[test]
+    fn misspell_abbrev_other_letters_do_not_fire() {
+        // Only u, r, n, g, y are special among single letters.
+        assert_eq!(count_misspellings("aa a bb"), 0.0);
+        assert_eq!(count_misspellings("aa b bb"), 0.0);
+        assert_eq!(count_misspellings("aa x bb"), 0.0);
+        assert_eq!(count_misspellings("aa z bb"), 0.0);
+    }
+
+    #[test]
+    fn misspell_abbrev_fires_once_per_surrounded_token() {
+        assert_eq!(count_misspellings("a u r b"), 2.0);
+        assert_eq!(count_misspellings("a ur u b"), 2.0);
+        assert_eq!(count_misspellings("a u r n g y b"), 5.0);
+    }
+
+    #[test]
+    fn misspell_combines_space_runs_and_abbrevs() {
+        // "aa u bb  cc": one abbrev + one two-space run = 2.
+        assert_eq!(count_misspellings("aa u bb  cc"), 2.0);
+        // "aa   u   bb": two three-space runs (2 matches each) + one 'u' = 5.
+        assert_eq!(count_misspellings("aa   u   bb"), 5.0);
+    }
+
+    // word_count follows the alphanumeric rule [a-zA-Z0-9]+ with REJECT.
+
+    #[test]
+    fn word_count_includes_digits_in_runs() {
+        // "gr8" is a single alphanumeric run of length 3 -> 3*4/2 = 6.
+        let features = extract_features("gr8");
+        assert_eq!(features.word_length * 3.0, 6.0);
+    }
+
+    #[test]
+    fn word_count_crosses_letter_digit_boundary() {
+        // "u4me" is one run of length 4 -> 4*5/2 = 10.
+        let features = extract_features("u4me");
+        assert_eq!(features.word_length * 4.0, 10.0);
+    }
+
+    #[test]
+    fn word_count_splits_on_non_alphanumeric() {
+        // "ab 12" -> two runs of length 2 each -> 3 + 3 = 6.
+        let features = extract_features("ab 12");
+        assert_eq!(features.word_length * 5.0, 6.0);
     }
 }

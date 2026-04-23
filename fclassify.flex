@@ -22,8 +22,9 @@ float misspell = 0, word_length = 0, num_total = 0, num_lowers = 0, num_caps = 0
     /* Rule 4: Count punctuation */
 [!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~]  ++num_punct; REJECT;
 
-    /* Rule 5: Count words */
-[a-zA-Z]+                   ++word_count; REJECT;
+    /* Rule 5: Count alphanumeric runs (flex REJECT enumerates every
+     * non-empty substring at every starting position in the run) */
+[a-zA-Z0-9]+                ++word_count; REJECT;
 
     /* Rule 6: Words starting with capital (after whitespace/start) */
 (^|[ \t\n])[A-Z][a-z]*      ++initial_cap; REJECT;
@@ -34,12 +35,17 @@ float misspell = 0, word_length = 0, num_total = 0, num_lowers = 0, num_caps = 0
     /* Rule 8: Repeated emphasis (!! or ??) */
 [!]{2,}|[?]{2,}             ++repeat_emphasis; REJECT;
 
-    /* Rule 9: Common misspellings / l33t speak patterns
- * Based on yy_ec showing special classes for '1', '4', '8'
- * Common patterns: u/ur (you/your), 4 (for), gr8 (great), etc.
+    /* Rule 9: Chat/l33t abbreviations and multi-space runs.
+ * Two alternatives, both count additively:
+ *   a) A run of two or more literal ' ' characters. REJECT enumerates
+ *      lengths 2..=N so a run of length N fires (N - 1) matches.
+ *   b) A small set of chat abbreviations (u, r, n, g, y, ur, gr8) with a
+ *      literal space on BOTH sides. The leading space is consumed; the
+ *      trailing space is trailing context. Case-sensitive. Neither EOF
+ *      nor tab nor punctuation satisfies either boundary.
  */
-[Uu][Rr]?/[^a-zA-Z]         ++misspell; REJECT;
-[0-9]+[a-zA-Z]+|[a-zA-Z]+[0-9]+[a-zA-Z]*  ++misspell; REJECT;
+[ ]{2,}                     ++misspell; REJECT;
+[ ](gr8|ur|[urngy])/[ ]     ++misspell; REJECT;
 
     /* Rule 10: Whitespace - ignore */
 [ \t\n]+                    ;
