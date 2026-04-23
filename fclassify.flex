@@ -58,7 +58,7 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        printf("usage: %s [model filename]\n", argv[0]);
+        fprintf(stderr, "usage: %s [model filename]\n", argv[0]);
         return 1;
     }
 
@@ -76,34 +76,33 @@ int main(int argc, char** argv)
 
     SVMUtil svmutil;
 
-    if (svmutil.Load(strFilename.c_str()))
+    if (!svmutil.Load(strFilename.c_str()))
+        return 1;
+
+    const int num_attributes = 8;
+
+    svm_node* node = new svm_node[num_attributes + 1];
+
+    for (int i = 0; i < num_attributes; i++)
     {
-        const int num_attributes = 8;
-
-        svm_node* node = new svm_node[num_attributes + 1];
-
-        for (int i = 0; i < num_attributes; i++)
-        {
-            node[i].index = i + 1;
-        }
-        node[num_attributes].index = -1;
-
-        node[0].value = num_lowers;
-        node[1].value = num_caps;
-        node[2].value = num_punct;
-        node[3].value = repeat_emphasis;
-        node[4].value = initial_cap;
-        node[5].value = intercap;
-        node[6].value = word_length;
-        node[7].value = misspell;
-
-        svmutil.ScaleNode(node);
-
-        double dPredictedClass = svm_predict(svmutil.m_pModel, node);
-        printf("%f\n", dPredictedClass);
-
-        delete[] node;
+        node[i].index = i + 1;
     }
+    node[num_attributes].index = -1;
 
+    node[0].value = num_lowers;
+    node[1].value = num_caps;
+    node[2].value = num_punct;
+    node[3].value = repeat_emphasis;
+    node[4].value = initial_cap;
+    node[5].value = intercap;
+    node[6].value = word_length;
+    node[7].value = misspell;
+
+    svmutil.ScaleNode(node);
+
+    double dPredictedClass = svm_predict(svmutil.m_pModel, node);
+    printf("%f\n", dPredictedClass);
+
+    delete[] node;
     return 0;
 }

@@ -286,13 +286,27 @@ void myfunction(int number)
 bool SVMUtil::Load(string filename)
 {
 	if(m_pModel)
+	{
 		svm_destroy_model(m_pModel);
-	
+		m_pModel = NULL;
+	}
+
 	string modelname = filename + ".mod";
 	string scalename = filename + ".sf";
 	m_pModel = svm_load_model(modelname.c_str());
-	LoadScaleFactors(scalename);
-	
+	if(!m_pModel)
+	{
+		cerr << "error: could not load SVM model from " << modelname << endl;
+		return false;
+	}
+
+	if(!LoadScaleFactors(scalename))
+	{
+		svm_destroy_model(m_pModel);
+		m_pModel = NULL;
+		return false;
+	}
+
 	return true;
 }
 
@@ -323,15 +337,33 @@ bool SVMUtil::LoadScaleFactors(string filename)
 {
 	ifstream fin;
 	fin.open(filename.c_str());
+	if(!fin.is_open())
+	{
+		cerr << "error: could not open scale factors file " << filename << endl;
+		return false;
+	}
+
 	fin >> m_nParams;
-	
+	if(!fin || m_nParams <= 0)
+	{
+		cerr << "error: invalid scale factors header in " << filename << endl;
+		return false;
+	}
+
 	if(m_pScaleFactors)
-		delete m_pScaleFactors;
+		delete[] m_pScaleFactors;
 	m_pScaleFactors = new double[m_nParams];
-	
+
 	for(int i=0; i<m_nParams; i++)
 	{
-		fin >>  m_pScaleFactors[i];	
+		fin >>  m_pScaleFactors[i];
+		if(!fin)
+		{
+			cerr << "error: truncated scale factors file " << filename << endl;
+			delete[] m_pScaleFactors;
+			m_pScaleFactors = NULL;
+			return false;
+		}
 	}
 	return true;
 }
