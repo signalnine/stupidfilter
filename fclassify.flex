@@ -64,12 +64,16 @@ int main(int argc, char** argv)
 
     yylex();
 
-    num_lowers = num_lowers / num_total;
-    num_caps = num_caps / num_total;
-    num_punct = num_punct / num_total;
-    initial_cap = initial_cap / word_count;
-    intercap = intercap / word_count;
-    word_length = word_count / num_total;
+    if (num_total > 0) {
+        num_lowers = num_lowers / num_total;
+        num_caps = num_caps / num_total;
+        num_punct = num_punct / num_total;
+        word_length = word_count / num_total;
+    }
+    if (word_count > 0) {
+        initial_cap = initial_cap / word_count;
+        intercap = intercap / word_count;
+    }
 
     // Model/scale factor filename (no extension)
     std::string strFilename = argv[1];
