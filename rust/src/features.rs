@@ -98,11 +98,14 @@ pub fn extract_features(text: &str) -> Features {
                 }
             }
 
-            // Check for intercap (camelCase) - lowercase followed by uppercase in the run
-            for j in start..(end - 1) {
-                if chars[j].is_lowercase() && chars[j + 1].is_uppercase() {
-                    intercap_count += 1.0;
-                    break; // Count only once per word
+            // Intercap: flex rule [a-zA-Z][A-Z] fires once for every position
+            // where any letter is followed by an uppercase letter (counted per
+            // match, not once per run).
+            if run_len >= 2 {
+                for j in start..(end - 1) {
+                    if chars[j + 1].is_uppercase() {
+                        intercap_count += 1.0;
+                    }
                 }
             }
         } else {
@@ -224,5 +227,63 @@ mod tests {
     fn test_extract_features_leet() {
         let features = extract_features("u r 2 cool 4 school");
         assert!(features.misspell > 0.0);
+    }
+
+    // Helper: convert the intercap ratio back to the raw count the flex
+    // scanner would have accumulated, to compare against C++ reference values.
+    fn intercap_count(input: &str) -> f64 {
+        let features = extract_features(input);
+        let word_count = features.word_length * input.chars().count() as f64;
+        (features.intercap * word_count).round()
+    }
+
+    #[test]
+    fn intercap_matches_flex_for_all_caps() {
+        // Flex fires rule 7 for every [a-zA-Z][A-Z] pair.
+        // "ABC" has pairs (A,B) and (B,C) -> 2.
+        assert_eq!(intercap_count("ABC"), 2.0);
+    }
+
+    #[test]
+    fn intercap_matches_flex_for_mixed_case_run() {
+        // "aBCd" has pairs (a,B) and (B,C) -> 2.
+        assert_eq!(intercap_count("aBCd"), 2.0);
+    }
+
+    #[test]
+    fn intercap_matches_flex_for_letter_then_upper_run() {
+        // "aXYz" has pairs (a,X) and (X,Y) -> 2.
+        assert_eq!(intercap_count("aXYz"), 2.0);
+    }
+
+    #[test]
+    fn intercap_counts_every_match_not_just_first() {
+        // "aBcDeF" has three transitions into uppercase: (a,B), (c,D), (e,F).
+        assert_eq!(intercap_count("aBcDeF"), 3.0);
+    }
+
+    #[test]
+    fn intercap_matches_flex_across_words() {
+        // "OMG ur SO DUMB!!!": OM, MG, SO, DU, UM, MB -> 6.
+        assert_eq!(intercap_count("OMG ur SO DUMB!!!"), 6.0);
+    }
+
+    #[test]
+    fn intercap_counts_camel_transition() {
+        // "HelloWorld": only (o,W) -> 1.
+        assert_eq!(intercap_count("HelloWorld"), 1.0);
+    }
+
+    #[test]
+    fn intercap_zero_for_all_lower_start() {
+        // "Hello": only (H,e) is a letter pair touching a capital, but
+        // the capital is first, not second -> 0.
+        assert_eq!(intercap_count("Hello"), 0.0);
+    }
+
+    #[test]
+    fn intercap_does_not_cross_whitespace() {
+        // "Hello World": pairs across the space are not letter-letter -> 0.
+        assert_eq!(intercap_count("Hello World"), 0.0);
     }
 }
