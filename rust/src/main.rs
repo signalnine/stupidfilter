@@ -34,11 +34,10 @@ fn main() {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input).expect("Failed to read stdin");
 
-    // Trim trailing whitespace (flex scanner behavior)
-    let input = input.trim_end();
-
-    // Extract features and predict
-    let features = extract_features(input);
+    // Pass raw stdin to the feature extractor. The flex scanner processes
+    // every byte, and rule 6 (initial_cap) depends on whitespace -- including
+    // the trailing `\n` echo appends -- to fire on the final word.
+    let features = extract_features(&input);
     let prediction = model.predict(&features);
 
     println!("{:.6}", prediction);

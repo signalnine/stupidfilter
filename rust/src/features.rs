@@ -38,7 +38,11 @@ impl Features {
 /// contributes only to num_total and is otherwise ignored.
 pub fn extract_features(text: &str) -> Features {
     let bytes = text.as_bytes();
-    let num_total = bytes.len() as f64;
+
+    // Flex rule 1 is `.` which matches any byte except `\n`, so newlines
+    // do not contribute to num_total even though they still act as whitespace
+    // for the scanner's other rules.
+    let num_total = bytes.iter().filter(|&&b| b != b'\n').count() as f64;
 
     if num_total == 0.0 {
         return Features {
@@ -301,7 +305,8 @@ mod tests {
     /// scanner, to compare against instrumented C++ reference values.
     fn initial_cap_count(input: &str) -> f64 {
         let features = extract_features(input);
-        let num_total = input.as_bytes().len() as f64;
+        // num_total counts every byte except `\n`, matching flex rule 1 (`.`).
+        let num_total = input.as_bytes().iter().filter(|&&b| b != b'\n').count() as f64;
         let word_count = features.word_length * num_total;
         (features.initial_cap * word_count).round()
     }
@@ -440,7 +445,8 @@ mod tests {
     // scanner would have accumulated, to compare against C++ reference values.
     fn intercap_count(input: &str) -> f64 {
         let features = extract_features(input);
-        let word_count = features.word_length * input.chars().count() as f64;
+        let num_total = input.as_bytes().iter().filter(|&&b| b != b'\n').count() as f64;
+        let word_count = features.word_length * num_total;
         (features.intercap * word_count).round()
     }
 
@@ -603,15 +609,18 @@ mod tests {
 
     #[test]
     fn word_count_splits_on_whitespace_only() {
-        // "ab 12" -> two runs of length 2 each -> 3 + 3 = 6.
+        // "ab 12" -> two runs of length 2 each -> 3 + 3 = 6. num_total = 5
+        // (space is counted by flex rule 1).
         let features = extract_features("ab 12");
         assert_eq!(features.word_length * 5.0, 6.0);
-        // Tab is also a delimiter: "ab\t12" -> same as space.
+        // Tab is also a delimiter: "ab\t12" -> same as space. num_total = 5.
         let features = extract_features("ab\t12");
         assert_eq!(features.word_length * 5.0, 6.0);
-        // Newline is a delimiter: "ab\n12" -> two length-2 runs.
+        // Newline is a delimiter: "ab\n12" -> two length-2 runs. num_total = 4
+        // because flex rule 1 (`.`) does not match `\n`; C++ reference
+        // confirms word_count=6, num_total=4.
         let features = extract_features("ab\n12");
-        assert_eq!(features.word_length * 5.0, 6.0);
+        assert_eq!(features.word_length * 4.0, 6.0);
     }
 
     #[test]
