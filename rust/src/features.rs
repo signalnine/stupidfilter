@@ -108,28 +108,21 @@ pub fn extract_features(text: &str) -> Features {
         k += 1;
     }
 
-    // intercap (unchanged here) still uses the legacy [a-zA-Z][A-Z]-pair scan.
-    // That rule also diverges from the compiled C++ DFA on inputs with trailing
-    // whitespace, but is left as-is in this fix and tracked separately.
-    let mut j = 0;
-    while j < n {
-        if bytes[j].is_ascii_alphabetic() {
-            let start = j;
-            while j < n && bytes[j].is_ascii_alphabetic() {
-                j += 1;
+    // intercap fires once per [a-zA-Z][A-Z] pair, but only when ASCII
+    // whitespace ([ \t\n]) exists somewhere later in the input. Verified
+    // against the instrumented C++ binary: the trailing context is global
+    // (any ws after the pair anywhere in the input), not local to the
+    // alphabetic run -- e.g. 'aBc.\n' fires (newline lookahead exists), but
+    // 'aBc.' does not (nothing follows that satisfies [ \t\n]).
+    let last_ws_pos: Option<usize> = bytes.iter().rposition(|&b| is_ws_byte(b));
+    if let Some(ws_pos) = last_ws_pos {
+        for i in 0..n.saturating_sub(1) {
+            if bytes[i].is_ascii_alphabetic()
+                && bytes[i + 1].is_ascii_uppercase()
+                && ws_pos > i + 1
+            {
+                intercap_count += 1.0;
             }
-            let end = j;
-            let run_len = end - start;
-
-            if run_len >= 2 {
-                for k in start..(end - 1) {
-                    if bytes[k + 1].is_ascii_uppercase() {
-                        intercap_count += 1.0;
-                    }
-                }
-            }
-        } else {
-            j += 1;
         }
     }
 
@@ -452,39 +445,45 @@ mod tests {
 
     #[test]
     fn intercap_matches_flex_for_all_caps() {
-        // Flex fires rule 7 for every [a-zA-Z][A-Z] pair.
-        // "ABC" has pairs (A,B) and (B,C) -> 2.
-        assert_eq!(intercap_count("ABC"), 2.0);
+        // Flex fires rule 7 for every [a-zA-Z][A-Z] pair, but only when ASCII
+        // whitespace exists later in the input. With trailing space, "ABC"
+        // has pairs (A,B) and (B,C) -> 2.
+        assert_eq!(intercap_count("ABC "), 2.0);
     }
 
     #[test]
     fn intercap_matches_flex_for_mixed_case_run() {
-        // "aBCd" has pairs (a,B) and (B,C) -> 2.
-        assert_eq!(intercap_count("aBCd"), 2.0);
+        // "aBCd " has pairs (a,B) and (B,C) -> 2.
+        assert_eq!(intercap_count("aBCd "), 2.0);
     }
 
     #[test]
     fn intercap_matches_flex_for_letter_then_upper_run() {
-        // "aXYz" has pairs (a,X) and (X,Y) -> 2.
-        assert_eq!(intercap_count("aXYz"), 2.0);
+        // "aXYz " has pairs (a,X) and (X,Y) -> 2.
+        assert_eq!(intercap_count("aXYz "), 2.0);
     }
 
     #[test]
     fn intercap_counts_every_match_not_just_first() {
-        // "aBcDeF" has three transitions into uppercase: (a,B), (c,D), (e,F).
-        assert_eq!(intercap_count("aBcDeF"), 3.0);
+        // "aBcDeF " has three transitions into uppercase: (a,B), (c,D), (e,F).
+        assert_eq!(intercap_count("aBcDeF "), 3.0);
     }
 
     #[test]
     fn intercap_matches_flex_across_words() {
-        // "OMG ur SO DUMB!!!": OM, MG, SO, DU, UM, MB -> 6.
-        assert_eq!(intercap_count("OMG ur SO DUMB!!!"), 6.0);
+        // "OMG ur SO DUMB!!!": OMG and SO are followed by ws (OM=1, MG=1, SO=1
+        // -> 3). DUMB is followed only by '!!!' then EOI -- no later ws, so
+        // (D,U), (U,M), (M,B) do NOT fire. Total = 3.
+        assert_eq!(intercap_count("OMG ur SO DUMB!!!"), 3.0);
+        // With a trailing space, all four runs fire: 2 + 0 + 1 + 3 = 6.
+        assert_eq!(intercap_count("OMG ur SO DUMB!!! "), 6.0);
     }
 
     #[test]
     fn intercap_counts_camel_transition() {
-        // "HelloWorld": only (o,W) -> 1.
-        assert_eq!(intercap_count("HelloWorld"), 1.0);
+        // "HelloWorld " has only (o,W) -> 1. Without trailing ws -> 0.
+        assert_eq!(intercap_count("HelloWorld "), 1.0);
+        assert_eq!(intercap_count("HelloWorld"), 0.0);
     }
 
     #[test]
@@ -498,6 +497,63 @@ mod tests {
     fn intercap_does_not_cross_whitespace() {
         // "Hello World": pairs across the space are not letter-letter -> 0.
         assert_eq!(intercap_count("Hello World"), 0.0);
+    }
+
+    // Trailing-context tests for stupidfilter-3t4. Reference values verified
+    // against an instrumented build of stupidfilter.cpp. Rule 7 fires only
+    // when the alphabetic run is immediately followed by [ \t\n].
+
+    #[test]
+    fn intercap_zero_without_trailing_whitespace() {
+        assert_eq!(intercap_count("aBc"), 0.0);
+        assert_eq!(intercap_count("aBcD"), 0.0);
+        assert_eq!(intercap_count("ABC"), 0.0);
+        assert_eq!(intercap_count("iPhone"), 0.0);
+        assert_eq!(intercap_count("HelloWorld"), 0.0);
+        assert_eq!(intercap_count("aBcDeF"), 0.0);
+    }
+
+    #[test]
+    fn intercap_fires_with_trailing_space_tab_newline() {
+        assert_eq!(intercap_count("aBc "), 1.0);
+        assert_eq!(intercap_count("aBc\t"), 1.0);
+        assert_eq!(intercap_count("aBc\n"), 1.0);
+        assert_eq!(intercap_count("aBcD "), 2.0);
+        assert_eq!(intercap_count("aBcD\n"), 2.0);
+        assert_eq!(intercap_count("ABC "), 2.0);
+        assert_eq!(intercap_count("iPhone "), 1.0);
+        assert_eq!(intercap_count("HelloWorld "), 1.0);
+        assert_eq!(intercap_count("aBcDeF "), 3.0);
+    }
+
+    #[test]
+    fn intercap_zero_when_run_followed_by_non_whitespace() {
+        // Punctuation, digits, and non-ASCII bytes do NOT satisfy the
+        // trailing-context requirement.
+        assert_eq!(intercap_count("aBc."), 0.0);
+        assert_eq!(intercap_count("aBc!"), 0.0);
+        assert_eq!(intercap_count("aBc1"), 0.0);
+        assert_eq!(intercap_count("aBcé"), 0.0);
+    }
+
+    #[test]
+    fn intercap_per_run_trailing_context() {
+        // "Hello aBc": aBc has no trailing ws (end of input) -> 0.
+        assert_eq!(intercap_count("Hello aBc"), 0.0);
+        // "Hello aBc ": aBc followed by space -> 1.
+        assert_eq!(intercap_count("Hello aBc "), 1.0);
+        // "aBc Hello ": aBc fires (1), Hello has no intercap pair.
+        assert_eq!(intercap_count("aBc Hello "), 1.0);
+        // "OMG ur SO DUMB!!!": OMG=2, ur=0, SO=1, DUMB followed by '!' -> 0.
+        assert_eq!(intercap_count("OMG ur SO DUMB!!!"), 3.0);
+        // "OMG ur SO DUMB!!! ": all runs followed by ws; DUMB now contributes 3.
+        assert_eq!(intercap_count("OMG ur SO DUMB!!! "), 6.0);
+    }
+
+    #[test]
+    fn intercap_no_pair_in_run_returns_zero_even_with_trailing_ws() {
+        // "Hello ": only (H,e); no [a-zA-Z][A-Z] pair -> 0.
+        assert_eq!(intercap_count("Hello "), 0.0);
     }
 
     // Reference values come from running the C++ binary with feature-dump
