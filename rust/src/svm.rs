@@ -135,8 +135,16 @@ impl SvmModel {
             .map_err(|_| "Invalid scale factor count")?;
 
         let mut factors = Vec::with_capacity(count);
-        for line in lines.take(count) {
-            let line = line.map_err(|e| format!("Read error: {}", e))?;
+        for _ in 0..count {
+            let line = lines
+                .next()
+                .ok_or_else(|| format!(
+                    "Truncated scale factors file {}: expected {} factors, got {}",
+                    path,
+                    count,
+                    factors.len()
+                ))?
+                .map_err(|e| format!("Read error: {}", e))?;
             let factor: f64 = line.trim().parse().map_err(|_| "Invalid scale factor")?;
             factors.push(factor);
         }

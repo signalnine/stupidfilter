@@ -9,7 +9,7 @@ A text classifier that detects low-quality writing. Uses an SVM model trained on
 echo "your text here" | bin/stupidfilter data/c_rbf
 ```
 
-Output: `0.0` = low-quality, `1.0` = acceptable. Values between indicate confidence.
+Output: `0.0` = low-quality, `1.0` = acceptable. The pre-trained C-SVC model returns a hard class label, not a probability.
 
 Strip HTML and normalize whitespace before classification. See `classify.sh` for an example.
 

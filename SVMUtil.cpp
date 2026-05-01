@@ -34,11 +34,28 @@ SVMUtil::SVMUtil()
 
 SVMUtil::~SVMUtil()
 {
-	// problem destroyed when the model is
-	//delete m_pProblem;
-	//m_pProblem = NULL;
 	if(m_pModel)
+	{
 		svm_destroy_model(m_pModel);
+		m_pModel = NULL;
+	}
+	if(m_pProblem)
+	{
+		free(m_pProblem->y);
+		if(m_pProblem->x)
+		{
+			for(int i=0; i<m_pProblem->l; i++)
+				free(m_pProblem->x[i]);
+			free(m_pProblem->x);
+		}
+		delete m_pProblem;
+		m_pProblem = NULL;
+	}
+	if(m_pScaleFactors)
+	{
+		delete[] m_pScaleFactors;
+		m_pScaleFactors = NULL;
+	}
 }
 
 // borrowed from read_problem in svm-train.c
@@ -46,8 +63,7 @@ svm_problem* SVMUtil::ParseTrainingFile(std::string strFilename)
 {
 	m_pProblem = new svm_problem;
 	svm_node *x_space;
-	svm_parameter param;
-	
+
 	const char* filename = strFilename.c_str();
 	
 	int elements, i, j;
@@ -130,24 +146,6 @@ out2:
 		x_space[j++].index = -1;
 	}
 
-	if(param.gamma == 0)
-		param.gamma = 1.0/m_nParams;
-
-	if(param.kernel_type == PRECOMPUTED)
-		for(i=0;i<m_pProblem->l;i++)
-		{
-			if (m_pProblem->x[i][0].index != 0)
-			{
-				fprintf(stderr,"Wrong input format: first column must be 0:sample_serial_number\n");
-				exit(1);
-			}
-			if ((int)m_pProblem->x[i][0].value <= 0 || (int)m_pProblem->x[i][0].value > m_nParams)
-			{
-				fprintf(stderr,"Wrong input format: sample_serial_number out of range\n");
-				exit(1);
-			}
-		}
-
 	fclose(fp);
 	
 	ScaleTrainingData();
@@ -184,13 +182,10 @@ bool SVMUtil::DetermineScaleFactors()
 		return false;
 	
 	svm_node* pNode = NULL;
-	double* pMaxValue = Malloc(double, m_nParams);
-	m_pScaleFactors = Malloc(double, m_nParams);
-	
-	for(int j=0; j < m_nParams; j++)
-	{
-		pMaxValue[j] = 0; // assumes values should be scaled between 0 and 1
-	}
+	double* pMaxValue = new double[m_nParams]();
+	if(m_pScaleFactors)
+		delete[] m_pScaleFactors;
+	m_pScaleFactors = new double[m_nParams]();
 	
 	for(int i=0; i < m_pProblem->l; i++)
 	{
@@ -213,9 +208,10 @@ bool SVMUtil::DetermineScaleFactors()
 		if(pMaxValue[j] > 0)
 			m_pScaleFactors[j] = (double)1./pMaxValue[j];
 		else
-			m_pScaleFactors[j] = 1; 
-	}	
+			m_pScaleFactors[j] = 1;
+	}
 
+	delete[] pMaxValue;
 	return true;
 }
 

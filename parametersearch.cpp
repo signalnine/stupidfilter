@@ -12,43 +12,42 @@
 #define REFINED_RANGE 1.33
 
 CParameterSearch::CParameterSearch(svm_problem* pProb, svm_parameter* pSvmParam, string strFilename)
+	: m_pProblem(NULL), m_pSvmParam(NULL), m_pofs(NULL), m_pOA(NULL)
 {
 	if(!pProb || !pSvmParam)
 		return;
-	
-	m_pOA = NULL;
-	m_pofs = NULL;
+
 	m_strFilename = strFilename;
-	
+
 	ResetSerialization();
-	
+
 	m_pProblem = pProb;
 	m_pSvmParam = pSvmParam;
 
-	m_rangeParameters.fParam1Min = -15;
-	//m_rangeParameters.fParam1Max = -1;
-	m_rangeParameters.fParam1Max = 3;
+	// Param1 = C, Param2 = gamma (RBF kernel grid search per libsvm guide)
+	m_rangeParameters.fParam1Min = -5;
+	m_rangeParameters.fParam1Max = 15;
 	m_rangeParameters.fParam1Step = 4;
 	m_rangeParameters.bParam1UseLog = true;
 	m_rangeParameters.fParam1RefinementFactor = 2;
-	m_rangeParameters.fParam2Min = -13;
-	//m_rangeParameters.fParam2Max = -1;
-	m_rangeParameters.fParam2Max = -5;
+	m_rangeParameters.fParam2Min = -15;
+	m_rangeParameters.fParam2Max = 3;
 	m_rangeParameters.fParam2Step = 4;
 	m_rangeParameters.bParam2UseLog = true;
 	m_rangeParameters.fParam2RefinementFactor = 2;
 	
-	ParameterResult* pResult = new ParameterResult;
+	ParameterResult* pSeedResult = new ParameterResult;
 
 	const RangeParameters tempRP = m_rangeParameters;
 	*m_pOA << tempRP;
 	m_pofs->flush();
-	
-	SearchRange( pResult, m_rangeParameters);
-	
-	// semi-infinite, breakable loop
-	while( pResult = GetNextResult())
-	{			
+
+	SearchRange( pSeedResult, m_rangeParameters);
+	delete pSeedResult;
+
+	ParameterResult* pResult = NULL;
+	while((pResult = GetNextResult()) != NULL)
+	{
 		RangeParameters Params;
 		GetRefinedParameters(pResult->nLevel, pResult->fParam1, pResult->fParam2, Params);
 		if(!SearchRange( pResult, Params))
@@ -58,7 +57,14 @@ CParameterSearch::CParameterSearch(svm_problem* pProb, svm_parameter* pSvmParam,
 
 CParameterSearch::~CParameterSearch()
 {
-	
+	for(ResultsSet::iterator it = m_searchResults.begin(); it != m_searchResults.end(); ++it)
+		delete *it;
+	m_searchResults.clear();
+
+	delete m_pOA;
+	m_pOA = NULL;
+	delete m_pofs;
+	m_pofs = NULL;
 }
 
 ParameterResult* CParameterSearch::GetNextResult()
@@ -84,24 +90,20 @@ bool CParameterSearch::SearchRange(ParameterResult* pResult, RangeParameters& Pa
 	float fParam2 = 0;
 	
 	double* target = new double[m_pProblem->l];
-/*	for(int i=0; i<m_pProblem->l; i++)
-	{
-		target[i] = 0;
-	}*/
-	
+
 	for(fParam1=Params.fParam1Min; fParam1<=Params.fParam1Max; fParam1+=Params.fParam1Step)
 	{
 		if(Params.bParam1UseLog)
-			m_pSvmParam->p = ::pow(2,fParam1);
+			m_pSvmParam->C = ::pow(2,fParam1);
 		else
-			m_pSvmParam->p = fParam1;
-		
+			m_pSvmParam->C = fParam1;
+
 		for(fParam2=Params.fParam2Min; fParam2<=Params.fParam2Max; fParam2+=Params.fParam2Step)
-		{	
+		{
 			if(Params.bParam2UseLog)
-				m_pSvmParam->C = ::pow(2,fParam2);
+				m_pSvmParam->gamma = ::pow(2,fParam2);
 			else
-				m_pSvmParam->C = fParam2;
+				m_pSvmParam->gamma = fParam2;
 			
 			int nFolds = 2;
 			svm_cross_validation(m_pProblem, m_pSvmParam, nFolds, target);
@@ -126,7 +128,7 @@ bool CParameterSearch::SearchRange(ParameterResult* pResult, RangeParameters& Pa
 			fStdDev = pow(fStdDev, (float)0.5) /  m_pProblem->l;
 			
 			std::cout << "\n****************" << std::endl;
-			std::cout << "C = 2^" << fParam2 << ", epsilon = 2^" << fParam1 << std::endl;
+			std::cout << "C = 2^" << fParam1 << ", gamma = 2^" << fParam2 << std::endl;
 			std::cout << "Avg Error: " << fError << "  Std Dev: " << fStdDev << std::endl;
 			std::cout << "Percent wrong: " << fWrong << std::endl;
 			
@@ -148,9 +150,11 @@ bool CParameterSearch::SearchRange(ParameterResult* pResult, RangeParameters& Pa
 		}
 	}
 	pResult->bRefined = true;
-	
+
+	delete[] target;
+
 	SerializeData();
-	
+
 	return true;
 }
 
