@@ -26,9 +26,23 @@ pub struct SupportVector {
 pub struct SvmModel {
     pub gamma: f64,
     pub rho: f64,
+    /// Class returned when the decision function is positive (sum > rho).
+    /// Read from the libsvm 'label' line; libsvm orders labels by their
+    /// first appearance in the training file, so this is not always 1.
+    pub label_pos: f64,
+    /// Class returned when the decision function is non-positive.
+    pub label_neg: f64,
     pub support_vectors: Vec<SupportVector>,
     pub scale_factors: Vec<f64>,
     pub num_features: usize,
+}
+
+struct ModelHeader {
+    gamma: f64,
+    rho: f64,
+    label_pos: f64,
+    label_neg: f64,
+    support_vectors: Vec<SupportVector>,
 }
 
 impl SvmModel {
@@ -37,26 +51,30 @@ impl SvmModel {
         let model_path = format!("{}.mod", base_path);
         let scale_path = format!("{}.sf", base_path);
 
-        let (gamma, rho, support_vectors) = Self::load_model(&model_path)?;
+        let header = Self::load_model(&model_path)?;
         let scale_factors = Self::load_scale_factors(&scale_path)?;
 
         Ok(SvmModel {
-            gamma,
-            rho,
-            support_vectors,
+            gamma: header.gamma,
+            rho: header.rho,
+            label_pos: header.label_pos,
+            label_neg: header.label_neg,
+            support_vectors: header.support_vectors,
             num_features: scale_factors.len(),
             scale_factors,
         })
     }
 
     /// Load the libsvm model file
-    fn load_model(path: &str) -> Result<(f64, f64, Vec<SupportVector>), String> {
+    fn load_model(path: &str) -> Result<ModelHeader, String> {
         let file = File::open(path).map_err(|e| format!("Cannot open {}: {}", path, e))?;
         let reader = BufReader::new(file);
-        let mut lines = reader.lines();
+        let lines = reader.lines();
 
-        let mut gamma = 0.0;
-        let mut rho = 0.0;
+        let mut gamma: Option<f64> = None;
+        let mut rho: Option<f64> = None;
+        let mut labels: Option<(f64, f64)> = None;
+        let mut kernel_type: Option<String> = None;
         let mut support_vectors = Vec::new();
         let mut in_sv_section = false;
 
@@ -72,23 +90,50 @@ impl SvmModel {
                 // Parse support vector line: "alpha_y index:value index:value ..."
                 let sv = Self::parse_sv_line(line)?;
                 support_vectors.push(sv);
-            } else if line.starts_with("gamma ") {
-                gamma = line[6..]
-                    .trim()
-                    .parse()
-                    .map_err(|_| "Invalid gamma value")?;
-            } else if line.starts_with("rho ") {
-                rho = line[4..]
-                    .trim()
-                    .parse()
-                    .map_err(|_| "Invalid rho value")?;
+            } else if let Some(rest) = line.strip_prefix("gamma ") {
+                gamma = Some(rest.trim().parse().map_err(|_| "Invalid gamma value")?);
+            } else if let Some(rest) = line.strip_prefix("rho ") {
+                rho = Some(rest.trim().parse().map_err(|_| "Invalid rho value")?);
+            } else if let Some(rest) = line.strip_prefix("label ") {
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if parts.len() < 2 {
+                    return Err(format!(
+                        "Invalid 'label' line (need 2 values for binary classifier): {}",
+                        line
+                    ));
+                }
+                let l0: f64 = parts[0].parse().map_err(|_| "Invalid label[0] value")?;
+                let l1: f64 = parts[1].parse().map_err(|_| "Invalid label[1] value")?;
+                labels = Some((l0, l1));
+            } else if let Some(rest) = line.strip_prefix("kernel_type ") {
+                kernel_type = Some(rest.trim().to_string());
             } else if line == "SV" {
                 in_sv_section = true;
             }
-            // Ignore other header lines (svm_type, kernel_type, nr_class, etc.)
+            // Ignore other header lines (svm_type, nr_class, total_sv, nr_sv).
         }
 
-        Ok((gamma, rho, support_vectors))
+        let rho = rho.ok_or("model file missing required 'rho' line")?;
+        // This binary only evaluates the RBF kernel, so an unspecified
+        // kernel_type is treated as RBF. gamma is required in that case.
+        let is_rbf = kernel_type.as_deref().map_or(true, |k| k == "rbf");
+        let gamma = if is_rbf {
+            gamma.ok_or("model file missing required 'gamma' line for RBF kernel")?
+        } else {
+            gamma.unwrap_or(0.0)
+        };
+        // libsvm always writes a 'label' line for classification models, but
+        // fall back to the historical (1, 0) ordering if absent so trivially
+        // hand-constructed test models still work.
+        let (label_pos, label_neg) = labels.unwrap_or((1.0, 0.0));
+
+        Ok(ModelHeader {
+            gamma,
+            rho,
+            label_pos,
+            label_neg,
+            support_vectors,
+        })
     }
 
     /// Parse a support vector line
@@ -204,12 +249,14 @@ impl SvmModel {
             sum += sv.alpha_y * kernel_val;
         }
 
-        // Decision: positive = class 1, negative = class 0
-        // The original returns 1.0 for "non-stupid" and 0.0 for "stupid"
+        // Match libsvm's svm_predict: when the decision function is positive
+        // return label[0], otherwise label[1]. For the bundled c_rbf model
+        // these are 1 and 0, but a retrain can produce 'label 0 1' and the
+        // meaning of the output flips with it.
         if sum > self.rho {
-            1.0
+            self.label_pos
         } else {
-            0.0
+            self.label_neg
         }
     }
 }
