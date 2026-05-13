@@ -75,6 +75,8 @@ impl SvmModel {
         let mut rho: Option<f64> = None;
         let mut labels: Option<(f64, f64)> = None;
         let mut kernel_type: Option<String> = None;
+        let mut svm_type: Option<String> = None;
+        let mut nr_class: Option<u32> = None;
         let mut support_vectors = Vec::new();
         let mut in_sv_section = false;
 
@@ -107,21 +109,50 @@ impl SvmModel {
                 labels = Some((l0, l1));
             } else if let Some(rest) = line.strip_prefix("kernel_type ") {
                 kernel_type = Some(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("svm_type ") {
+                svm_type = Some(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("nr_class ") {
+                nr_class = Some(
+                    rest.trim()
+                        .parse()
+                        .map_err(|_| "Invalid nr_class value")?,
+                );
             } else if line == "SV" {
                 in_sv_section = true;
             }
-            // Ignore other header lines (svm_type, nr_class, total_sv, nr_sv).
+            // Ignore other header lines (total_sv, nr_sv).
+        }
+
+        // This port only supports binary C-SVC with the RBF kernel. Anything
+        // else would silently apply rbf_kernel() to incompatible parameters
+        // and return garbage. Reject up front with a clear message.
+        if let Some(ref t) = svm_type {
+            if t != "c_svc" {
+                return Err(format!(
+                    "unsupported svm_type '{}': only 'c_svc' is supported",
+                    t
+                ));
+            }
+        }
+        if let Some(ref k) = kernel_type {
+            if k != "rbf" {
+                return Err(format!(
+                    "unsupported kernel_type '{}': only 'rbf' is supported",
+                    k
+                ));
+            }
+        }
+        if let Some(n) = nr_class {
+            if n != 2 {
+                return Err(format!(
+                    "unsupported nr_class {}: only binary classifiers (nr_class 2) are supported",
+                    n
+                ));
+            }
         }
 
         let rho = rho.ok_or("model file missing required 'rho' line")?;
-        // This binary only evaluates the RBF kernel, so an unspecified
-        // kernel_type is treated as RBF. gamma is required in that case.
-        let is_rbf = kernel_type.as_deref().map_or(true, |k| k == "rbf");
-        let gamma = if is_rbf {
-            gamma.ok_or("model file missing required 'gamma' line for RBF kernel")?
-        } else {
-            gamma.unwrap_or(0.0)
-        };
+        let gamma = gamma.ok_or("model file missing required 'gamma' line for RBF kernel")?;
         // libsvm always writes a 'label' line for classification models, but
         // fall back to the historical (1, 0) ordering if absent so trivially
         // hand-constructed test models still work.
@@ -264,13 +295,195 @@ impl SvmModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::extract_features;
+    use std::io::Write;
+
+    fn bundled_model() -> SvmModel {
+        // Unit tests run with cwd = crate root (rust/), same as parity.rs.
+        SvmModel::load("../data/c_rbf").expect("load bundled c_rbf model")
+    }
+
+    fn empty_model() -> SvmModel {
+        SvmModel {
+            gamma: 0.5,
+            rho: 0.0,
+            label_pos: 1.0,
+            label_neg: 0.0,
+            support_vectors: Vec::new(),
+            scale_factors: Vec::new(),
+            num_features: 0,
+        }
+    }
 
     #[test]
-    fn test_parse_sv_line() {
+    fn parse_sv_line_basic() {
         let line = "1 1:0.739726 2:0.054795 3:0.027397";
         let sv = SvmModel::parse_sv_line(line).unwrap();
         assert_eq!(sv.alpha_y, 1.0);
         assert_eq!(sv.features.indices, vec![1, 2, 3]);
         assert!((sv.features.values[0] - 0.739726).abs() < 1e-6);
+    }
+
+    #[test]
+    fn predict_hello_world_matches_cpp_reference() {
+        // Reference C++ classification for "Hello world\n" is 1.0 (not stupid).
+        let model = bundled_model();
+        let features = extract_features("Hello world\n");
+        assert_eq!(model.predict(&features), 1.0);
+    }
+
+    #[test]
+    fn predict_l33t_matches_cpp_reference() {
+        // Reference C++ classification for the canonical stupid l33t example
+        // is 0.0. classify_test.sh asserts the same end-to-end.
+        let model = bundled_model();
+        let features = extract_features("OMG UR SO DUMB 4 REAL\n");
+        assert_eq!(model.predict(&features), 0.0);
+    }
+
+    #[test]
+    fn load_model_rejects_missing_files() {
+        let err = SvmModel::load("/nonexistent/path/that/does/not/exist")
+            .expect_err("load should fail when files are absent");
+        assert!(
+            err.to_lowercase().contains("cannot open"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn load_model_rejects_non_rbf_kernel() {
+        let dir = tempdir("non_rbf_kernel");
+        let mod_text =
+            std::fs::read_to_string("../data/c_rbf.mod").expect("read bundled model");
+        let altered = mod_text.replace("kernel_type rbf", "kernel_type linear");
+        std::fs::write(dir.join("m.mod"), altered).unwrap();
+        std::fs::copy("../data/c_rbf.sf", dir.join("m.sf")).unwrap();
+
+        let err = SvmModel::load(dir.join("m").to_str().unwrap())
+            .expect_err("non-RBF kernel must be rejected");
+        assert!(
+            err.contains("kernel_type"),
+            "expected kernel_type error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn load_model_rejects_non_csvc_svm_type() {
+        let dir = tempdir("non_csvc");
+        let mod_text =
+            std::fs::read_to_string("../data/c_rbf.mod").expect("read bundled model");
+        let altered = mod_text.replace("svm_type c_svc", "svm_type nu_svc");
+        std::fs::write(dir.join("m.mod"), altered).unwrap();
+        std::fs::copy("../data/c_rbf.sf", dir.join("m.sf")).unwrap();
+
+        let err = SvmModel::load(dir.join("m").to_str().unwrap())
+            .expect_err("non c_svc svm_type must be rejected");
+        assert!(
+            err.contains("svm_type"),
+            "expected svm_type error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn load_model_rejects_multiclass() {
+        let dir = tempdir("multiclass");
+        let mod_text =
+            std::fs::read_to_string("../data/c_rbf.mod").expect("read bundled model");
+        let altered = mod_text.replace("nr_class 2", "nr_class 3");
+        std::fs::write(dir.join("m.mod"), altered).unwrap();
+        std::fs::copy("../data/c_rbf.sf", dir.join("m.sf")).unwrap();
+
+        let err = SvmModel::load(dir.join("m").to_str().unwrap())
+            .expect_err("multiclass model must be rejected");
+        assert!(
+            err.contains("nr_class"),
+            "expected nr_class error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn load_model_rejects_truncated_scale_file() {
+        let dir = tempdir("truncated_sf");
+        std::fs::copy("../data/c_rbf.mod", dir.join("m.mod")).unwrap();
+        // Claim 8 scale factors but only provide 3.
+        let mut sf = std::fs::File::create(dir.join("m.sf")).unwrap();
+        writeln!(sf, "8\n1.0\n2.0\n3.0").unwrap();
+
+        let err = SvmModel::load(dir.join("m").to_str().unwrap())
+            .expect_err("truncated scale file must be rejected");
+        assert!(
+            err.to_lowercase().contains("truncated") || err.contains("scale"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rbf_kernel_matches_hand_computed_value() {
+        // K(x, y) = exp(-gamma * ||x - y||^2). With gamma = 0.5, x = [1.0, 2.0],
+        // sv values at the matching libsvm 1-based indices = [0.5, 1.5]:
+        //   diff_sq = (1.0 - 0.5)^2 + (2.0 - 1.5)^2 = 0.25 + 0.25 = 0.5
+        //   K = exp(-0.5 * 0.5) = exp(-0.25)
+        let mut model = empty_model();
+        model.gamma = 0.5;
+        let sv = SparseVector {
+            indices: vec![1, 2],
+            values: vec![0.5, 1.5],
+        };
+        let k = model.rbf_kernel(&[1.0, 2.0], &sv);
+        let expected = (-0.25f64).exp();
+        assert!((k - expected).abs() < 1e-12, "got {}, want {}", k, expected);
+    }
+
+    #[test]
+    fn rbf_kernel_handles_missing_sparse_indices() {
+        // Missing indices in the sparse SV are treated as 0.0. With gamma=1,
+        // x = [3.0, 0.0, 4.0] and sv with only index 2 set to 5.0:
+        //   diff_sq = 9 + 25 + 16 = 50; K = exp(-50)
+        let mut model = empty_model();
+        model.gamma = 1.0;
+        let sv = SparseVector {
+            indices: vec![2],
+            values: vec![5.0],
+        };
+        let k = model.rbf_kernel(&[3.0, 0.0, 4.0], &sv);
+        let expected = (-50.0f64).exp();
+        assert!((k - expected).abs() < 1e-300, "got {}, want {}", k, expected);
+    }
+
+    #[test]
+    fn scale_features_passes_through_when_scale_factors_short() {
+        // scale_features doubles each feature scaled by the corresponding
+        // factor; trailing features are returned unscaled.
+        let mut model = empty_model();
+        model.scale_factors = vec![2.0, 3.0, 4.0];
+        let scaled = model.scale_features(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(scaled, vec![2.0, 3.0, 4.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn scale_features_ignores_extra_scale_factors() {
+        // More scale factors than features just leaves the tail unused.
+        let mut model = empty_model();
+        model.scale_factors = vec![2.0; 12];
+        let scaled = model.scale_features(&[1.0; 8]);
+        assert_eq!(scaled, vec![2.0; 8]);
+    }
+
+    fn tempdir(tag: &str) -> std::path::PathBuf {
+        // CARGO_TARGET_TMPDIR is only set for integration tests, so unit tests
+        // fall back to the system temp dir. Use the process id plus a tag so
+        // parallel test runs don't collide.
+        let dir = std::env::temp_dir()
+            .join(format!("stupidfilter-svm-test-{}", std::process::id()))
+            .join(tag);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

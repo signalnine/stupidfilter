@@ -92,11 +92,27 @@ else
   report 1 "prints a clear error on classification failure (got: $out)"
 fi
 
-# --- Test 5: backslashes preserved (read -r) ---
-# With read -r, 'a\b' stays 'a\b'. Without -r, it becomes 'ab'.
-# We verify by grepping classify.sh itself; pure end-to-end is hard since
-# the feature extractor doesn't echo input.
-grep -q 'read -r' classify.sh
-report $? "classify.sh uses 'read -r'"
+# --- Test 5: multi-line input is fully consumed, matching bin/stupidfilter ---
+# Pipe a multi-line stupid input through both classify.sh and bin/stupidfilter
+# directly. Both must produce the same classification. Prior 'read -r' wrapper
+# silently dropped every line after the first.
+multiline_input=$'OMG UR SO DUMB 4 REAL\nU R THE WORST EVER LOL\nWTF IS THIS GARBAGE'
+
+direct=$(printf '%s\n' "$multiline_input" | sed -r 's/ +/ /g' | bin/stupidfilter data/c_rbf)
+out=$(printf '%s\n' "$multiline_input" | bash classify.sh 2>&1)
+
+case "$direct" in
+  0.000000)
+    echo "$out" | grep -q 'likely to be stupid'
+    report $? "classify.sh consumes all stdin lines (multi-line stupid input)"
+    ;;
+  1.000000)
+    echo "$out" | grep -q 'not likely to be stupid'
+    report $? "classify.sh consumes all stdin lines (multi-line stupid input)"
+    ;;
+  *)
+    report 1 "classify.sh consumes all stdin lines (direct score was '$direct')"
+    ;;
+esac
 
 exit $fail

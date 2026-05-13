@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 
-echo "Enter text to be classified, hit return to run classification."
-read -r text
+if [ -t 0 ]; then
+  echo "Enter text to be classified, then press Ctrl+D to run classification."
+fi
+text=$(cat)
 
-if ! score=$(echo "$text" | sed -r 's/ +/ /g' | bin/stupidfilter data/c_rbf); then
+if ! score=$(printf '%s' "$text" | sed -r 's/ +/ /g' | bin/stupidfilter data/c_rbf); then
   echo "classification failed: could not run bin/stupidfilter" >&2
   exit 1
 fi

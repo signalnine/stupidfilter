@@ -108,7 +108,12 @@ int main(int argc, char** argv)
     node[6].value = word_length;
     node[7].value = misspell;
 
-    svmutil.ScaleNode(node);
+    if (!svmutil.ScaleNode(node))
+    {
+        fprintf(stderr, "error: feature scaling failed; scale factors missing or invalid\n");
+        delete[] node;
+        return 1;
+    }
 
     double dPredictedClass = svm_predict(svmutil.m_pModel, node);
     printf("%f\n", dPredictedClass);
